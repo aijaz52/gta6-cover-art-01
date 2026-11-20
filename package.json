@@ -1,0 +1,14 @@
+{
+  "name": "vice-cover-studio",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "An original, dependency-free offline photo cover studio",
+  "engines": { "node": ">=22.18.0" },
+  "scripts": {
+    "start": "node serve.ts",
+    "build": "node main.ts",
+    "test": "node --test app/tests/studio.test.mjs",
+    "check:browser": "node tools/browser-check.mjs"
+  }
+}
