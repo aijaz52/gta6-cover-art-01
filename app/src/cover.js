@@ -1,229 +1,180 @@
-/** Original rendering engine. Coordinates are in a 1000 × 1250 design space. */
-export const WIDTH = 1000;
-export const HEIGHT = 1250;
-export const MAX_CAPTION = 56;
-export const DEFAULTS = Object.freeze({ caption: 'VICE AFTER HOURS', layout: 'classic', palette: 'sunset', grain: true, zoom: 1, panX: 0, panY: 0 });
-export const PALETTES = Object.freeze({
-  sunset: { name: 'Vice sunset', sky: '#f6a789', glow: '#ffe5a0', water: '#52b4bc', dark: '#20233f', accent: '#f58cb5', skin: '#ce846b', light: '#fff3d9' },
-  neon: { name: 'Neon nights', sky: '#9b77bd', glow: '#f5a9cf', water: '#3e91ae', dark: '#202239', accent: '#e982ba', skin: '#bd7b92', light: '#fcdfb7' },
-  heat: { name: 'Golden hour', sky: '#e99b62', glow: '#ffe3a0', water: '#83a791', dark: '#353d37', accent: '#f6bc61', skin: '#b87c58', light: '#fff0cb' },
-});
+export const WIDTH = 960;
+export const HEIGHT = 1200;
+export const DEFAULT_CAPTION = 'VICE AFTER DARK';
 
-const panels = {
-  classic: [
-    { scene: 'city', points: [[0, 0], [620, 0], [555, 664], [0, 765]], crop: [0.17, 0.1, 1.04] },
-    { scene: 'portrait', points: [[620, 0], [1000, 0], [1000, 600], [555, 664]], crop: [0.72, 0.15, 1.4] },
-    { scene: 'boat', points: [[0, 765], [555, 664], [500, 1250], [0, 1250]], crop: [0.3, 0.7, 1.3] },
-    { scene: 'car', points: [[555, 664], [1000, 600], [1000, 1250], [500, 1250]], crop: [0.72, 0.7, 1.2] },
+export const layouts = {
+  skyline: [
+    [[0,0],[620,0],[535,435],[0,355]], [[620,0],[960,0],[960,380],[535,435]],
+    [[0,355],[535,435],[960,380],[960,792],[440,842],[0,885]],
+    [[0,885],[440,842],[490,1200],[0,1200]], [[440,842],[960,792],[960,1200],[490,1200]],
   ],
-  split: [
-    { scene: 'city', points: [[0, 0], [1000, 0], [1000, 400], [0, 500]], crop: [0.5, 0.2, 1.05] },
-    { scene: 'portrait', points: [[0, 500], [480, 452], [544, 1250], [0, 1250]], crop: [0.3, 0.5, 1.2] },
-    { scene: 'car', points: [[480, 452], [1000, 400], [1000, 900], [520, 950.75]], crop: [0.7, 0.5, 1.3] },
-    { scene: 'boat', points: [[520, 950.75], [1000, 900], [1000, 1250], [544, 1250]], crop: [0.65, 0.8, 1.1] },
+  crossfire: [
+    [[0,0],[960,0],[960,280],[390,357],[0,410]], [[0,410],[390,357],[525,810],[0,760]],
+    [[390,357],[960,280],[960,868],[525,810]],
+    [[0,760],[525,810],[410,1200],[0,1200]], [[525,810],[960,868],[960,1200],[410,1200]],
+  ],
+  strip: [
+    [[0,0],[960,0],[960,226],[490,278],[0,332]], [[0,332],[490,278],[590,710],[0,635]],
+    [[490,278],[960,226],[960,757],[590,710]],
+    [[0,635],[590,710],[960,757],[960,960],[0,1050]], [[0,1050],[960,960],[960,1200],[0,1200]],
   ],
 };
 
-export function normalizeCaption(value) {
-  return Array.from(String(value ?? '').normalize('NFC').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim()).slice(0, MAX_CAPTION).join('');
+export const palettes = {
+  sunset: ['#ff9d68','#f474a0','#ffc984','#63d6c2','#c085db'],
+  lagoon: ['#79ddc6','#78cddd','#feb984','#a5de9b','#5e8edb'],
+  nocturne: ['#bd80ff','#f367a2','#877df1','#55bbef','#ff986b'],
+};
+
+export function bounds(points) {
+  const xs = points.map(([x]) => x);
+  const ys = points.map(([,y]) => y);
+  const x = Math.min(...xs), y = Math.min(...ys);
+  return {x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y};
 }
 
-export function normalizeOptions(input = {}) {
-  const number = (v, fallback, min, max) => Number.isFinite(Number(v)) ? Math.max(min, Math.min(max, Number(v))) : fallback;
-  return {
-    caption: normalizeCaption(input.caption ?? DEFAULTS.caption),
-    layout: Object.hasOwn(panels, input.layout) ? input.layout : DEFAULTS.layout,
-    palette: Object.hasOwn(PALETTES, input.palette) ? input.palette : DEFAULTS.palette,
-    grain: input.grain !== false,
-    zoom: number(input.zoom ?? 1, 1, 1, 2.5),
-    panX: number(input.panX ?? 0, 0, -1, 1),
-    panY: number(input.panY ?? 0, 0, -1, 1),
-  };
+export function crop(sw, sh, w, h, zoom = 1, fx = .5, fy = .5) {
+  const scale = Math.max(w / sw, h / sh) * Math.max(1, zoom);
+  const dw = w / scale, dh = h / scale;
+  const place = (extent, size, focus) => Math.max(0, Math.min(extent - size, extent * focus - size / 2));
+  return [place(sw, dw, fx), place(sh, dh, fy), dw, dh];
 }
 
-export function getPanels(layout = 'classic') {
-  return (Object.hasOwn(panels, layout) ? panels[layout] : panels.classic).map(p => ({ ...p, points: p.points.map(pair => [...pair]), crop: [...p.crop] }));
-}
-
-export function coverCrop(iw, ih, x, y, w, h, zoom = 1, panX = 0, panY = 0) {
-  if (![iw, ih, w, h, zoom].every(v => Number.isFinite(v) && v > 0)) throw new RangeError('Image and destination dimensions must be positive.');
-  const scale = Math.max(w / iw, h / ih) * Math.max(1, zoom);
-  const dw = iw * scale, dh = ih * scale;
-  return { x: x - (dw - w) * (1 + Math.max(-1, Math.min(1, panX))) / 2, y: y - (dh - h) * (1 + Math.max(-1, Math.min(1, panY))) / 2, width: dw, height: dh };
-}
-
-export function captionLines(text, maxLength = 14) {
-  const words = normalizeCaption(text).toLocaleUpperCase('en-US').split(' ').filter(Boolean);
-  const lines = [];
-  let line = '';
-  for (const word of words) {
-    if (line && line.length + word.length + 1 > maxLength && lines.length < 2) { lines.push(line); line = ''; }
-    line += (line ? ' ' : '') + word;
+export function captionLines(caption) {
+  const words = caption.trim().replace(/\s+/gu, ' ').toUpperCase().split(' ').filter(Boolean);
+  if (words.length < 2) return words;
+  let best = [words.join(' ')], score = Infinity;
+  for (let split = 1; split < words.length; split++) {
+    const candidate = [words.slice(0, split).join(' '), words.slice(split).join(' ')];
+    const lengths = candidate.map(line => Array.from(line).length);
+    const cost = Math.max(...lengths) + Math.abs(lengths[0] - lengths[1]) * .3;
+    if (cost < score) { best = candidate; score = cost; }
   }
-  if (line) lines.push(line);
-  return lines;
+  return best;
 }
 
-export function exportFilename(caption) {
-  const slug = normalizeCaption(caption).normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 64);
-  return slug ? `${slug}-cover.png` : 'vice-cover.png';
+export function exportName(caption) {
+  const slug = caption.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 64).replace(/-$/, '');
+  return `${slug || 'vice-cover'}.png`;
 }
 
-function polygon(ctx, points, fill, stroke, width = 5) {
+function shape(ctx, points, color) {
   ctx.beginPath();
-  points.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+  points.forEach(([x,y], i) => i ? ctx.lineTo(x,y) : ctx.moveTo(x,y));
   ctx.closePath();
-  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
-  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = width; ctx.stroke(); }
+  if (color) { ctx.fillStyle = color; ctx.fill(); }
 }
-function line(ctx, points, color, width = 4) {
-  ctx.beginPath(); points.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
-  ctx.strokeStyle = color; ctx.lineWidth = width; ctx.stroke();
-}
-function ellipse(ctx, x, y, rx, ry, fill, stroke, width = 4) {
-  ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2); ctx.fillStyle = fill; ctx.fill();
-  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = width; ctx.stroke(); }
-}
-function rect(ctx, x, y, w, h, color) { ctx.fillStyle = color; ctx.fillRect(x, y, w, h); }
-function gradient(ctx, y1, y2, a, b) { const g = ctx.createLinearGradient(0, y1, 0, y2); g.addColorStop(0, a); g.addColorStop(1, b); return g; }
 
-function palm(ctx, x, y, scale, p) {
-  ctx.save(); ctx.translate(x, y); ctx.scale(scale, scale);
-  polygon(ctx, [[-14, 390], [1, 110], [-16, 0], [1, -5], [21, 110], [11, 390]], p.dark);
-  const leaves = [ [[0, 0], [-85, -74], [-178, -46], [-104, -28], [-28, 12]], [[0, 0], [-95, 3], [-153, 80], [-77, 34]], [[0, 0], [-39, -113], [16, -156], [-4, -77], [15, 0]], [[0, 0], [63, -88], [161, -71], [81, -46]], [[0, 0], [98, -13], [160, 47], [73, 19]], [[0, 0], [63, 48], [78, 126], [32, 54]] ];
-  for (const leaf of leaves) polygon(ctx, leaf, p.dark);
+function disk(ctx, x, y, radius, color) {
+  ctx.beginPath(); ctx.arc(x,y,radius,0,Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+}
+
+function palm(ctx, x, y, size, flip = 1) {
+  ctx.save(); ctx.translate(x,y); ctx.scale(size * flip,size);
+  const ink = '#211329';
+  shape(ctx, [[-10,140],[10,140],[3,72],[-9,-1],[-16,4],[-7,78]], ink);
+  for (const [dx, dy] of [[-109,19],[-88,-31],[-53,-61],[14,-67],[70,-44],[95,-3],[70,43]]) {
+    ctx.beginPath(); ctx.moveTo(-12,6);
+    ctx.quadraticCurveTo(dx * .55,dy - 28,dx,dy);
+    ctx.quadraticCurveTo(dx * .62,dy - 5,-12,14);
+    ctx.fillStyle = ink; ctx.fill();
+  }
   ctx.restore();
 }
 
-function city(ctx, p) {
-  rect(ctx, 0, 0, 1000, 1250, gradient(ctx, 0, 820, p.sky, p.glow));
-  ellipse(ctx, 385, 292, 145, 145, p.glow);
-  rect(ctx, 0, 590, 1000, 660, p.water);
-  for (let i = 0; i < 15; i++) {
-    const x = i * 78 - 20, h = 75 + ((i * 67) % 158);
-    rect(ctx, x, 595 - h, 57, h, i % 2 ? '#94788a' : '#a68d98');
-    for (let k = 0; k < 4; k++) rect(ctx, x + 9 + k * 11, 610 - h, 4, h - 25, p.glow);
+function illustration(ctx, box, i, tint) {
+  ctx.save(); ctx.translate(box.x,box.y); ctx.scale(box.w / 480,box.h / 300);
+  const sky = ctx.createLinearGradient(0,0,0,300);
+  sky.addColorStop(0,'#39204f'); sky.addColorStop(.67,tint); sky.addColorStop(1,'#fdd3a0');
+  ctx.fillStyle = sky; ctx.fillRect(0,0,480,300);
+  disk(ctx, [355,248,352,165,310][i], 111, 64, '#ffdea2');
+  ctx.fillStyle = tint;
+  for (let y = 120; y < 172; y += 10) ctx.fillRect(0,y,480,2 + (y-120)/14);
+  for (let j = 0; j < 25; j++) {
+    const x = j * 21 - 10, h = 12 + (j * 37 + i * 49) % 73;
+    ctx.fillStyle = j % 2 ? '#6b3c62' : '#55334f'; ctx.fillRect(x,201-h,17,h);
+    ctx.fillStyle = '#dfa285';
+    for (let y = 208 - h; y < 194; y += 9) ctx.fillRect(x + 4,y,3,2);
   }
-  polygon(ctx, [[-30, 687], [434, 557], [550, 583], [80, 790]], p.light, p.dark, 4);
-  line(ctx, [[0, 728], [500, 583]], p.accent, 8);
-  for (let i = 0; i < 16; i++) line(ctx, [[(i * 113) % 1000, 650 + i * 36], [(i * 113) % 1000 + 90, 650 + i * 36]], '#b5d4c2', 3);
-  palm(ctx, 90, 190, 1.25, p); palm(ctx, 490, 365, 0.68, p);
-  line(ctx, [[262, 204], [280, 197], [295, 204]], p.dark, 3);
-  line(ctx, [[320, 173], [333, 168], [345, 173]], p.dark, 3);
+  ctx.fillStyle = '#36213f'; ctx.fillRect(0,200,480,100);
+  for (let j = 0; j < 16; j++) {
+    const x = (j * 113 + i * 39) % 475, y = 207 + (j * 17) % 89;
+    ctx.fillStyle = j % 3 ? '#694261' : tint; ctx.fillRect(x,y,21 + j % 6 * 5,2);
+  }
+  if (i === 0 || i === 1) {
+    palm(ctx,i === 0 ? 84 : 344,113,1.34,i === 0 ? 1 : -1);
+    palm(ctx,i === 0 ? 166 : 421,161,.79,-1);
+  } else if (i === 2 || i === 4) {
+    palm(ctx,49,96,1.58); palm(ctx,452,127,1.24,-1);
+    const dx = i === 2 ? 115 : 80, dy = i === 2 ? 187 : 231;
+    ctx.translate(dx,dy);
+    shape(ctx, [[0,51],[22,22],[80,13],[112,-12],[193,-10],[228,16],[268,24],[281,54],[269,68],[12,68]], '#201626');
+    shape(ctx, [[10,48],[30,29],[88,21],[116,-5],[189,-3],[222,22],[262,31],[272,48],[200,56],[27,58]], tint);
+    shape(ctx, [[96,20],[121,0],[182,2],[211,22]], '#362644');
+    shape(ctx, [[11,49],[72,43],[68,49],[17,54]], '#ffefc7');
+    ctx.fillStyle = '#ff674c'; ctx.fillRect(239,36,30,6);
+    for (const x of [62,217]) { disk(ctx,x,61,19,'#17131e'); disk(ctx,x,61,9,'#a4859c'); }
+  } else {
+    shape(ctx, [[71,247],[179,221],[326,198],[380,200],[334,239],[160,255]], '#1d172c');
+    shape(ctx, [[90,243],[204,232],[303,212],[365,201],[319,227],[155,249]], '#ffefe0');
+    shape(ctx, [[195,229],[222,201],[265,197],[286,215]], tint);
+  }
+  ctx.restore();
 }
 
-function portrait(ctx, p) {
-  rect(ctx, 0, 0, 1000, 1250, gradient(ctx, 0, 900, p.water, p.sky));
-  for (let i = 0; i < 9; i++) polygon(ctx, [[i * 150 - 250, 1250], [i * 150 + 100, 0], [i * 150 + 170, 0], [i * 150 - 190, 1250]], '#ffffff17');
-  palm(ctx, 930, 160, 0.75, p);
-  polygon(ctx, [[530, 470], [545, 174], [622, 105], [784, 111], [871, 245], [862, 585]], p.dark, p.dark, 7);
-  polygon(ctx, [[612, 437], [613, 571], [526, 631], [791, 722], [862, 600], [755, 552], [752, 424]], p.skin, p.dark, 7);
-  polygon(ctx, [[584, 256], [630, 182], [771, 212], [807, 346], [770, 461], [701, 510], [619, 459], [578, 345]], p.skin, p.dark, 7);
-  polygon(ctx, [[604, 249], [662, 218], [776, 266], [765, 178], [628, 153], [571, 250], [556, 428], [597, 391]], p.dark);
-  polygon(ctx, [[570, 639], [623, 574], [703, 643], [785, 581], [894, 678], [960, 1150], [437, 1150]], p.light, p.dark, 8);
-  polygon(ctx, [[619, 580], [697, 648], [671, 793], [583, 662]], p.accent, p.dark, 5);
-  polygon(ctx, [[784, 583], [697, 648], [733, 793], [829, 653]], p.accent, p.dark, 5);
-  polygon(ctx, [[594, 290], [686, 296], [677, 354], [613, 346]], p.dark, p.dark, 6);
-  polygon(ctx, [[710, 299], [795, 291], [784, 347], [723, 354]], p.dark, p.dark, 6);
-  line(ctx, [[681, 310], [714, 310]], p.dark, 10);
-  line(ctx, [[607, 302], [654, 312]], p.water, 5); line(ctx, [[725, 310], [769, 301]], p.water, 5);
-  line(ctx, [[696, 335], [686, 384], [706, 391]], '#8e535d', 5);
-  line(ctx, [[668, 425], [709, 431], [733, 421]], p.dark, 5);
-  ellipse(ctx, 597, 390, 13, 23, p.glow, p.dark, 4);
-  line(ctx, [[712, 663], [718, 1080]], p.dark, 5);
-  for (let i = 0; i < 4; i++) ellipse(ctx, 739, 816 + i * 73, 5, 5, p.dark);
-  polygon(ctx, [[840, 718], [878, 930], [820, 1120], [776, 1088], [803, 917], [780, 774]], p.skin, p.dark, 7);
-}
+const crops = [[.25,.29,1.13],[.73,.27,1.48],[.5,.5,1],[.27,.75,1.54],[.76,.68,1.23]];
 
-function boat(ctx, p) {
-  rect(ctx, 0, 0, 1000, 1250, gradient(ctx, 600, 1250, p.water, '#266b86'));
-  for (let i = 0; i < 28; i++) line(ctx, [[(i * 71) % 1000 - 100, 700 + i * 23], [(i * 71) % 1000 + 140, 656 + i * 23]], i % 3 ? '#8bcbce' : p.light, i % 3 ? 3 : 8);
-  polygon(ctx, [[-70, 1035], [392, 805], [541, 848], [271, 1105], [59, 1142]], p.light, p.dark, 9);
-  polygon(ctx, [[-40, 1039], [258, 1063], [516, 858], [282, 1114], [57, 1134]], p.accent, p.dark, 5);
-  polygon(ctx, [[126, 1004], [247, 864], [359, 850], [336, 931], [271, 996]], p.dark, p.dark, 6);
-  polygon(ctx, [[180, 971], [259, 880], [335, 868], [304, 930]], p.water);
-  line(ctx, [[-40, 1137], [126, 1168], [314, 1091]], p.light, 17);
-  line(ctx, [[-40, 1170], [140, 1192], [317, 1120]], '#c8e4dc', 7);
-}
-
-function car(ctx, p) {
-  rect(ctx, 0, 0, 1000, 1250, gradient(ctx, 500, 1250, p.sky, p.glow));
-  rect(ctx, 0, 930, 1000, 320, '#626076');
-  polygon(ctx, [[0, 1190], [1000, 1020], [1000, 1050], [0, 1230]], p.light);
-  for (let i = 0; i < 6; i++) palm(ctx, 520 + i * 120, 735 - i * 19, 0.32, p);
-  ellipse(ctx, 800, 1136, 254, 47, '#25243b88');
-  ellipse(ctx, 635, 1081, 48, 76, p.dark, p.dark, 6);
-  ellipse(ctx, 923, 1031, 42, 68, p.dark, p.dark, 6);
-  polygon(ctx, [[516, 1013], [566, 912], [708, 822], [873, 810], [979, 902], [1009, 1021], [579, 1124], [520, 1088]], p.accent, p.dark, 9);
-  polygon(ctx, [[590, 915], [722, 838], [858, 830], [911, 904], [723, 956]], p.dark, p.dark, 6);
-  polygon(ctx, [[623, 910], [731, 853], [771, 849], [770, 927], [724, 939]], p.water);
-  polygon(ctx, [[790, 847], [851, 845], [886, 900], [789, 927]], '#8dd0ce');
-  polygon(ctx, [[533, 1016], [725, 976], [977, 925], [1003, 976], [580, 1094], [526, 1060]], '#e7b1bc', p.dark, 5);
-  polygon(ctx, [[543, 1026], [607, 1014], [605, 1044], [538, 1057]], p.glow, p.dark, 4);
-  polygon(ctx, [[647, 1006], [713, 991], [713, 1022], [647, 1040]], p.glow, p.dark, 4);
-  line(ctx, [[559, 1080], [717, 1040]], p.dark, 9);
-  line(ctx, [[782, 956], [799, 1022], [899, 994]], p.dark, 4);
-  line(ctx, [[815, 956], [842, 950]], p.dark, 5);
-}
-
-const sceneRenderers = { city, portrait, boat, car };
-
-export function renderCover(canvas, input = {}, image = null) {
-  const opts = normalizeOptions(input);
-  const ctx = canvas.getContext('2d', { alpha: false });
-  if (!ctx) throw new Error('This browser does not support a 2D canvas.');
-  const palette = PALETTES[opts.palette];
-  ctx.save(); ctx.scale(canvas.width / WIDTH, canvas.height / HEIGHT);
-  rect(ctx, 0, 0, WIDTH, HEIGHT, palette.dark);
-  for (const panel of getPanels(opts.layout)) {
-    ctx.save(); polygon(ctx, panel.points); ctx.clip();
+export function drawCover(ctx, {image = null, caption = DEFAULT_CAPTION, layout = 'skyline', palette = 'sunset', zoom = 1} = {}) {
+  const panels = Object.hasOwn(layouts, layout) ? layouts[layout] : layouts.skyline;
+  const colors = Object.hasOwn(palettes, palette) ? palettes[palette] : palettes.sunset;
+  ctx.save(); ctx.scale(ctx.canvas.width / WIDTH, ctx.canvas.height / HEIGHT);
+  ctx.fillStyle = '#1a1122'; ctx.fillRect(0,0,WIDTH,HEIGHT);
+  panels.forEach((points, i) => {
+    const {x,y,w,h} = bounds(points);
+    ctx.save(); shape(ctx, points); ctx.clip();
     if (image) {
-      const xs = panel.points.map(p => p[0]), ys = panel.points.map(p => p[1]);
-      const x = Math.min(...xs), y = Math.min(...ys), w = Math.max(...xs) - x, h = Math.max(...ys) - y;
-      const r = coverCrop(image.naturalWidth || image.width, image.naturalHeight || image.height, x, y, w, h, opts.zoom * panel.crop[2], opts.panX + (panel.crop[0] - 0.5) * 0.45, opts.panY + (panel.crop[1] - 0.5) * 0.45);
-      ctx.filter = 'saturate(1.35) contrast(1.18)'; ctx.drawImage(image, r.x, r.y, r.width, r.height); ctx.filter = 'none';
-      ctx.globalCompositeOperation = 'soft-light'; rect(ctx, x, y, w, h, gradient(ctx, y, y + h, palette.sky, palette.water));
-      ctx.globalCompositeOperation = 'source-over'; rect(ctx, x, y, w, h, gradient(ctx, y, y + h, '#20233f00', '#20233f55'));
-    } else {
-      if (opts.layout === 'split') {
-        if (panel.scene === 'portrait') { ctx.translate(-500, 350); ctx.scale(1.1, 0.8); }
-        if (panel.scene === 'car') ctx.translate(0, -270);
-        if (panel.scene === 'boat') ctx.translate(500, 85);
-      }
-      sceneRenderers[panel.scene](ctx, palette);
+      const [fx,fy,z] = crops[i];
+      const source = crop(image.naturalWidth, image.naturalHeight,w,h,z*zoom,fx,fy);
+      ctx.filter = 'contrast(1.17) saturate(.78)';
+      ctx.drawImage(image,...source,x,y,w,h); ctx.filter = 'none';
+      ctx.globalCompositeOperation = 'soft-light'; ctx.fillStyle = colors[i]; ctx.fillRect(x,y,w,h);
+      ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = .17; ctx.fillRect(x,y,w,h); ctx.globalAlpha = 1;
+    } else illustration(ctx,{x,y,w,h},i,colors[i]);
+    const wash = ctx.createLinearGradient(0,y,0,y+h);
+    wash.addColorStop(0,'#24133000'); wash.addColorStop(1,'#1b102662');
+    ctx.fillStyle = wash; ctx.fillRect(x,y,w,h);
+    for (let j = 0; j < 1100; j++) {
+      const dx = (j * 173.631 + i * 7) % w, dy = (j * 97.379) % h;
+      ctx.fillStyle = j % 2 ? '#fff4dc20' : '#1a102c23';
+      ctx.fillRect(x+dx,y+dy,2 + j % 3,2);
     }
-    ctx.restore(); polygon(ctx, panel.points, null, '#181a2a', 14);
-  }
-  if (opts.grain) {
-    let seed = 73;
-    ctx.fillStyle = '#fff5dc'; ctx.globalAlpha = 0.1;
-    for (let i = 0; i < 4600; i++) { seed = (seed * 1664525 + 1013904223) >>> 0; const x = seed % WIDTH; seed = (seed * 1664525 + 1013904223) >>> 0; ctx.fillRect(x, seed % HEIGHT, 1.3, 1.3); }
-    ctx.globalAlpha = 1;
-  }
-  ctx.textAlign = 'left'; ctx.fillStyle = palette.light; ctx.font = 'bold 16px Arial, sans-serif';
-  ctx.fillText('AN INDEPENDENT COVER STORY', 31, 42);
-  ctx.textAlign = 'right'; ctx.fillText('VOL. 01', 970, 42);
-  const lines = captionLines(opts.caption);
+    ctx.restore();
+    shape(ctx, points); ctx.strokeStyle = '#1a1122'; ctx.lineWidth = 13; ctx.lineJoin = 'round'; ctx.stroke();
+  });
+  ctx.strokeStyle = '#1a1122'; ctx.lineWidth = 26; ctx.strokeRect(0,0,WIDTH,HEIGHT);
+  ctx.strokeStyle = '#fff0d893'; ctx.lineWidth = 2; ctx.strokeRect(22,22,WIDTH-44,HEIGHT-44);
+
+  const lines = captionLines(caption);
   if (lines.length) {
-    const maxWidth = 876, baseSize = lines.length === 1 ? 143 : 155;
-    ctx.font = `900 ${baseSize}px Impact, 'Arial Black', sans-serif`;
-    const longest = Math.max(...lines.map(l => ctx.measureText(l).width));
-    const fontSize = Math.min(baseSize, baseSize * maxWidth / Math.max(1, longest));
-    const lineHeight = fontSize * 0.98;
-    const start = 875 - ((lines.length - 1) * lineHeight) / 2;
-    ctx.font = `900 ${fontSize}px Impact, 'Arial Black', sans-serif`; ctx.textAlign = 'center'; ctx.lineJoin = 'round';
-    lines.forEach((text, index) => {
-      const y = start + index * lineHeight;
-      ctx.strokeStyle = '#181a2a'; ctx.lineWidth = 22; ctx.strokeText(text, 506, y + 8);
-      ctx.fillStyle = palette.accent; ctx.fillText(text, 506, y + 8);
-      ctx.strokeStyle = '#181a2a'; ctx.lineWidth = 13; ctx.strokeText(text, 500, y);
-      ctx.fillStyle = '#fff8e8'; ctx.fillText(text, 500, y);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+    const font = size => `italic 900 ${size}px Impact, 'Arial Black', system-ui, sans-serif`;
+    const base = lines.length === 1 ? 144 : 151;
+    ctx.font = font(base);
+    const preferred = lines.map(line => Math.max(1, Math.floor(base * Math.min(1, 776 / ctx.measureText(line).width))));
+    const sizes = preferred.map(size => Math.min(size, Math.ceil(Math.min(...preferred) * 1.5)));
+    const step = Math.min(139, (sizes[0] + (sizes[1] ?? 0)) * .43 + 14);
+    lines.forEach((line, i) => {
+      const size = sizes[i];
+      ctx.font = font(size);
+      const y = 610 + (i - (lines.length - 1) / 2) * step;
+      ctx.lineWidth = 26; ctx.strokeStyle = '#1a1122'; ctx.strokeText(line,484,y+13);
+      ctx.strokeStyle = '#1a1122'; ctx.lineWidth = 22; ctx.strokeText(line,480,y);
+      ctx.strokeStyle = colors[1]; ctx.lineWidth = 5; ctx.strokeText(line,480,y+3);
+      const fill = ctx.createLinearGradient(0,y-size*.44,0,y+size*.34);
+      fill.addColorStop(0,'#fff8de'); fill.addColorStop(.56,'#fff0cb'); fill.addColorStop(1,colors[0]);
+      ctx.fillStyle = fill; ctx.fillText(line,480,y);
     });
   }
-  ctx.font = 'bold 13px Arial, sans-serif'; ctx.textAlign = 'left';
-  ctx.fillStyle = palette.light; ctx.fillText('GOOD STORIES. QUESTIONABLE DECISIONS.', 30, 1219);
-  ctx.textAlign = 'right'; ctx.fillText('CUSTOM EDITION', 970, 1219);
-  ctx.strokeStyle = '#181a2a'; ctx.lineWidth = 16; ctx.strokeRect(0, 0, WIDTH, HEIGHT);
   ctx.restore();
-  return opts;
 }

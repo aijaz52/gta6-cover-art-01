@@ -1,126 +1,135 @@
-import { DEFAULTS, MAX_CAPTION, PALETTES, normalizeCaption, normalizeOptions, renderCover, exportFilename } from './cover.js';
+import {WIDTH, HEIGHT, DEFAULT_CAPTION, drawCover, exportName} from './cover.js';
 
-const $ = id => document.getElementById(id);
-const canvas = $('cover');
-let state = { ...DEFAULTS };
-let photo = null;
-let photoUrl = null;
-let uploadGeneration = 0;
-let exporting = false;
-let frame = 0;
+const byId = id => document.getElementById(id);
+const preview = byId('preview');
+const context = preview.getContext('2d', {alpha:false});
+const caption = byId('caption');
+const zoom = byId('zoom');
+const photo = byId('photo');
+const drop = byId('drop');
+const demo = byId('demo');
+const download = byId('download');
+const size = byId('size');
+const status = byId('status');
+let image = null;
+let revision = 0;
+let pendingFrame = 0;
 
-function status(message, error = false) {
-  $('status').textContent = message;
-  $('status').classList.toggle('error', error);
+function options() {
+  const checked = name => document.querySelector(`input[name="${name}"]:checked`).value;
+  return {image, caption:caption.value, layout:checked('layout'), palette:checked('palette'), zoom:Number(zoom.value)};
 }
 
-function paint() {
-  frame = 0;
-  try {
-    renderCover(canvas, state, photo);
-    canvas.setAttribute('aria-label', `${state.caption || 'Untitled'} cover, ${state.layout === 'classic' ? 'four diagonal panels' : 'four split panels'}, ${PALETTES[state.palette].name}${photo ? ', using your uploaded photo' : ', original illustrated city, character, boat and car'}`);
-  } catch (error) { status(`Could not render the cover: ${error.message}`, true); }
-}
-function schedulePaint() { if (!frame) frame = requestAnimationFrame(paint); }
-
-function syncControls() {
-  $('caption').value = state.caption;
-  $('caption-count').textContent = `${Array.from(state.caption).length} / ${MAX_CAPTION}`;
-  for (const input of document.querySelectorAll('input[name="layout"]')) input.checked = input.value === state.layout;
-  for (const input of document.querySelectorAll('input[name="palette"]')) input.checked = input.value === state.palette;
-  $('grain').checked = state.grain;
-  $('zoom').value = state.zoom; $('zoom-value').value = `${Math.round(state.zoom * 100)}%`;
-  $('pan-x').value = state.panX; $('pan-y').value = state.panY;
-  $('photo-controls').hidden = !photo;
-}
-
-function clearPhoto() {
-  uploadGeneration++;
-  photo = null;
-  if (photoUrl) URL.revokeObjectURL(photoUrl);
-  photoUrl = null;
-  $('photo-input').value = '';
-  $('upload-title').textContent = 'Drop your photo here';
-  $('upload-detail').replaceChildren(document.createTextNode('or '), Object.assign(document.createElement('u'), { textContent: 'browse files' }), document.createTextNode(' to get started'));
-  $('photo-controls').hidden = true;
-  state.zoom = 1; state.panX = 0; state.panY = 0;
+function refresh() {
+  byId('count').textContent = `${caption.value.length} / ${caption.maxLength}`;
+  byId('zoom-value').textContent = `${Number(zoom.value).toFixed(2)}×`;
+  const text = caption.value.trim();
+  preview.setAttribute('aria-label', text ? `Cover preview: ${text}` : 'Untitled cover preview');
+  if (!pendingFrame) pendingFrame = requestAnimationFrame(() => {
+    pendingFrame = 0;
+    drawCover(context, options());
+  });
 }
 
 async function loadPhoto(file) {
   if (!file) return;
-  const generation = ++uploadGeneration;
-  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) { status('Choose a JPG, PNG or WebP image. Your current cover is still here.', true); return; }
-  if (file.size > 20 * 1024 * 1024) { status('That photo is over 20 MB. Choose a smaller image and try again.', true); return; }
+  const current = ++revision;
+  if (file.size > 25 * 1024 * 1024 || !/^image\/(jpeg|png|webp|avif|gif|bmp|x-ms-bmp)$/i.test(file.type)) {
+    status.textContent = 'Choose a supported image under 25 MB.';
+    return;
+  }
   const url = URL.createObjectURL(file);
-  status('Opening your photo…');
   try {
-    const image = new Image(); image.src = url; await image.decode();
-    if (generation !== uploadGeneration) { URL.revokeObjectURL(url); return; }
-    if (!image.naturalWidth || !image.naturalHeight || image.naturalWidth * image.naturalHeight > 64_000_000) throw new Error('Choose an image with fewer than 64 million pixels.');
-    if (photoUrl) URL.revokeObjectURL(photoUrl);
-    photoUrl = url; photo = image;
-    state.zoom = 1; state.panX = 0; state.panY = 0;
-    $('upload-title').textContent = file.name;
-    $('upload-detail').textContent = `${image.naturalWidth} × ${image.naturalHeight} · click to replace`;
-    syncControls(); schedulePaint();
-    status('Your photo is in. Tune the crop, set the mood, make it yours.');
-  } catch (error) {
+    status.textContent = 'Opening photo…';
+    const next = new Image();
+    next.src = url;
+    await next.decode();
+    if (current !== revision) return;
+    if (!next.naturalWidth || next.naturalWidth * next.naturalHeight > 48_000_000) {
+      status.textContent = 'Choose a photo under 48 megapixels.';
+      return;
+    }
+    image = next;
+    zoom.value = '1';
+    byId('photo-name').textContent = file.name;
+    byId('zoom-row').hidden = false;
+    demo.disabled = false;
+    status.textContent = 'Photo ready.';
+    refresh();
+  } catch {
+    if (current === revision) status.textContent = 'This image could not be opened.';
+  } finally {
     URL.revokeObjectURL(url);
-    if (generation === uploadGeneration) status(`Could not open that image. ${error.message || 'Try another file.'}`, true);
   }
 }
 
-async function exportPNG() {
-  if (exporting) return;
-  exporting = true;
-  const button = $('export-button'); button.disabled = true; button.querySelector('span').textContent = 'Exporting…';
-  status('Putting the finishing touches on your PNG…');
-  try {
-    await document.fonts.ready;
-    const output = document.createElement('canvas');
-    output.width = Number($('resolution').value); output.height = output.width * 1.25;
-    renderCover(output, { ...state }, photo);
-    const blob = await new Promise((resolve, reject) => output.toBlob(value => value ? resolve(value) : reject(new Error('The browser could not encode the PNG.')), 'image/png'));
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a'); anchor.href = url; anchor.download = exportFilename(state.caption);
-    document.body.append(anchor); anchor.click(); anchor.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    output.width = 1; output.height = 1;
-    status(`Cover exported. ${Number($('resolution').value)} × ${Number($('resolution').value) * 1.25} px of main character energy.`);
-  } catch (error) { status(`Export failed: ${error.message} Try the standard resolution.`, true); }
-  finally { exporting = false; button.disabled = false; button.querySelector('span').textContent = 'Export cover'; }
+function clearPhoto() {
+  revision++;
+  image = null;
+  photo.value = '';
+  zoom.value = '1';
+  byId('photo-name').textContent = 'Choose or drop a photo';
+  byId('zoom-row').hidden = true;
+  demo.disabled = true;
+  status.textContent = '';
+  refresh();
 }
 
-$('photo-input').addEventListener('change', event => loadPhoto(event.target.files?.[0]));
-const dropZone = $('drop-zone');
-for (const type of ['dragenter', 'dragover']) dropZone.addEventListener(type, event => { event.preventDefault(); dropZone.classList.add('dragover'); });
-for (const type of ['dragleave', 'drop']) dropZone.addEventListener(type, event => { event.preventDefault(); dropZone.classList.remove('dragover'); });
-dropZone.addEventListener('drop', event => loadPhoto(event.dataTransfer?.files?.[0]));
-document.addEventListener('dragover', event => event.preventDefault());
-document.addEventListener('drop', event => event.preventDefault());
-$('caption').addEventListener('input', event => {
-  const raw = event.target.value;
-  const limited = Array.from(raw).slice(0, MAX_CAPTION).join('');
-  if (raw !== limited) event.target.value = limited;
-  state.caption = normalizeCaption(limited);
-  $('caption-count').textContent = `${Array.from(limited).length} / ${MAX_CAPTION}`;
-  schedulePaint();
+photo.addEventListener('change', () => {
+  const [file] = photo.files;
+  photo.value = '';
+  void loadPhoto(file);
 });
-for (const name of ['layout', 'palette']) for (const input of document.querySelectorAll(`input[name="${name}"]`)) input.addEventListener('change', () => { state[name] = input.value; schedulePaint(); });
-$('grain').addEventListener('change', event => { state.grain = event.target.checked; schedulePaint(); });
-for (const [id, key] of [['zoom', 'zoom'], ['pan-x', 'panX'], ['pan-y', 'panY']]) $(id).addEventListener('input', event => { state[key] = Number(event.target.value); $('zoom-value').value = `${Math.round(state.zoom * 100)}%`; schedulePaint(); });
-$('demo-button').addEventListener('click', () => { clearPhoto(); syncControls(); schedulePaint(); status('Back to our original illustration. Your caption and style are still yours.'); });
-$('reset-button').addEventListener('click', () => {
-  clearPhoto(); state = normalizeOptions(DEFAULTS); syncControls(); $('resolution').value = '1200'; updateResolution(); schedulePaint(); status('A fresh canvas. Where are we headed next?');
+for (const event of ['dragenter','dragover']) drop.addEventListener(event, e => {
+  e.preventDefault(); drop.classList.add('dragging');
 });
-function updateResolution() { const width = Number($('resolution').value); $('export-meta').textContent = `${width} × ${width * 1.25} px · PNG · no watermark`; }
-$('resolution').addEventListener('change', updateResolution);
-$('export-button').addEventListener('click', exportPNG);
-document.addEventListener('keydown', event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); exportPNG(); } });
-const dialog = $('help-dialog');
-$('help-button').addEventListener('click', () => dialog.showModal());
-for (const id of ['close-help', 'help-done']) $(id).addEventListener('click', () => dialog.close());
-dialog.addEventListener('click', event => { if (event.target === dialog) { const r = dialog.getBoundingClientRect(); if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) dialog.close(); } });
-syncControls(); paint();
-document.fonts.ready.then(schedulePaint);
-if ('serviceWorker' in navigator && ['http:', 'https:'].includes(location.protocol)) navigator.serviceWorker.register('./sw.js').catch(() => { /* The local server works without a cache too. */ });
+drop.addEventListener('dragleave', e => {
+  if (!e.relatedTarget || !drop.contains(e.relatedTarget)) drop.classList.remove('dragging');
+});
+drop.addEventListener('drop', e => {
+  e.preventDefault(); drop.classList.remove('dragging');
+  void loadPhoto(e.dataTransfer.files[0]);
+});
+demo.addEventListener('click', () => { clearPhoto(); photo.focus(); });
+byId('reset').addEventListener('click', () => {
+  clearPhoto();
+  caption.value = DEFAULT_CAPTION;
+  document.querySelector('[value="skyline"]').checked = true;
+  document.querySelector('[value="sunset"]').checked = true;
+  size.value = '2';
+  refresh();
+});
+caption.addEventListener('input', refresh);
+zoom.addEventListener('input', refresh);
+document.querySelectorAll('input[type="radio"]').forEach(control => control.addEventListener('change', refresh));
+
+download.addEventListener('click', async () => {
+  download.disabled = true;
+  status.textContent = 'Rendering PNG…';
+  const settings = options();
+  const scale = Number(size.value);
+  try {
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const output = document.createElement('canvas');
+    output.width = WIDTH * scale;
+    output.height = HEIGHT * scale;
+    drawCover(output.getContext('2d', {alpha:false}), settings);
+    const png = await new Promise(resolve => output.toBlob(resolve, 'image/png'));
+    if (!png) throw new Error('PNG encoding failed');
+    const url = URL.createObjectURL(png);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = exportName(settings.caption);
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    status.textContent = 'PNG ready.';
+  } catch {
+    status.textContent = 'Export failed. Try a smaller PNG size.';
+  } finally {
+    download.disabled = false;
+  }
+});
+
+refresh();
