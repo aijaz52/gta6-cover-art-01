@@ -1,65 +1,31 @@
-/* A loopback-only, dependency-free static host for the offline studio. */
-import * as http from 'node:http';
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
-import { pathToFileURL } from 'node:url';
+/** A local-only static server for both the source tree and exported builds. */
+import { createServer } from 'node:http';
+import { stat, readFile } from 'node:fs/promises';
+import { dirname, resolve, extname, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const appDirectory = path.join(import.meta.dirname, 'app');
-const contentTypes = new Map([
-  ['.html', 'text/html; charset=utf-8'], ['.css', 'text/css; charset=utf-8'],
-  ['.js', 'text/javascript; charset=utf-8'], ['.mjs', 'text/javascript; charset=utf-8'],
-  ['.json', 'application/json; charset=utf-8'], ['.jpg', 'image/jpeg'],
-  ['.jpeg', 'image/jpeg'], ['.png', 'image/png'], ['.webp', 'image/webp'],
-  ['.svg', 'image/svg+xml'], ['.ico', 'image/x-icon']
-]);
-
-export function createStudioServer(root = appDirectory) {
-  const base = path.resolve(root);
-  return http.createServer(async (request, response) => {
-    const fail = (code, message) => { response.writeHead(code, { 'Content-Type': 'text/plain; charset=utf-8' });response.end(message); };
-    if (!['GET', 'HEAD'].includes(request.method || '')) {
-      response.setHeader('Allow', 'GET, HEAD');fail(405, 'Read-only static server');return;
-    }
-    let decoded;
-    try { decoded = decodeURIComponent((request.url || '/').split('?')[0]); }
-    catch { fail(400, 'Malformed URL');return; }
-    if (decoded.includes('\0') || decoded.includes('\\')) { fail(400, 'Invalid path');return; }
-    const requested = path.resolve(base, `.${decoded.endsWith('/') ? decoded + 'index.html' : decoded}`);
-    if (!requested.startsWith(base + path.sep)) { fail(403, 'Path outside app');return; }
-    try {
-      const actual = await fs.realpath(requested);
-      const actualBase = await fs.realpath(base);
-      if (!actual.startsWith(actualBase + path.sep)) { fail(403, 'Path outside app');return; }
-      const info = await fs.stat(actual);
-      if (!info.isFile()) { fail(404, 'File not found');return; }
-      const data = await fs.readFile(actual);
-      response.writeHead(200, {
-        'Content-Type': contentTypes.get(path.extname(actual).toLowerCase()) || 'application/octet-stream',
-        'Content-Length': data.length,
-        'Cache-Control': 'no-store',
-        'X-Content-Type-Options': 'nosniff',
-        'Referrer-Policy': 'no-referrer',
-        'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
-      });
-      response.end(request.method === 'HEAD' ? undefined : data);
-    } catch (error) {
-      fail(error.code === 'ENOENT' || error.code === 'ENOTDIR' ? 404 : 500, 'Unable to open this file');
-    }
-  });
-}
-
-const isEntrypoint = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
-if (isEntrypoint) {
-  const args = process.argv.slice(2);
-  const index = args.indexOf('--port');
-  const port = Number(index >= 0 ? args[index + 1] : process.env.PORT || 8080);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    console.error('Choose a port from 1 to 65535: node serve.ts --port 8080');
-    process.exitCode = 1;
-  } else {
-    const server = createStudioServer();
-    server.on('error', error => { console.error(`Studio server: ${error.message}`);process.exitCode = 1; });
-    server.listen(port, '127.0.0.1', () => console.log(`Vice Cover Studio is ready at http://127.0.0.1:${port} · Ctrl+C to stop`));
-    for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => server.close());
-  }
-}
+const here = dirname(fileURLToPath(import.meta.url));
+let root = here;
+try { await stat(resolve(here, 'index.html')); }
+catch { root = resolve(here, 'app'); }
+if (process.env.STUDIO_ROOT) root = resolve(process.env.STUDIO_ROOT);
+const port = Number(process.env.PORT || 4173);
+if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('PORT must be an integer between 0 and 65535.');
+const types = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json; charset=utf-8', '.txt': 'text/plain; charset=utf-8' };
+const server = createServer(async (req, res) => {
+  if (!['GET', 'HEAD'].includes(req.method || '')) { res.writeHead(405, { Allow: 'GET, HEAD' }); res.end('Method not allowed'); return; }
+  try {
+    const pathname = decodeURIComponent(new URL(req.url || '/', 'http://localhost').pathname);
+    if (pathname.includes('\0') || pathname.includes('\\')) { res.writeHead(400); res.end('Bad path'); return; }
+    const path = resolve(root, `.${pathname === '/' ? '/index.html' : pathname}`);
+    const rel = relative(root, path);
+    if (rel.startsWith(`..${sep}`) || rel === '..' || rel.split(sep).some(part => part.startsWith('.'))) { res.writeHead(403); res.end('Forbidden'); return; }
+    if (!(await stat(path)).isFile()) { res.writeHead(404); res.end('Not found'); return; }
+    const bytes = await readFile(path);
+    res.writeHead(200, { 'Content-Type': types[extname(path)] || 'application/octet-stream', 'Content-Length': bytes.length, 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'self'; img-src 'self' blob: data:; style-src 'self'; script-src 'self'; connect-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'", 'Referrer-Policy': 'no-referrer' });
+    res.end(req.method === 'HEAD' ? undefined : bytes);
+  } catch (error) { res.writeHead(error instanceof URIError ? 400 : 404); res.end(error instanceof URIError ? 'Bad path' : 'Not found'); }
+});
+server.on('error', error => { console.error(`Could not start Vice Cover Studio: ${error.message}`); process.exitCode = 1; });
+server.listen(port, '127.0.0.1', () => { const address = server.address(); console.log(`Vice Cover Studio → http://127.0.0.1:${typeof address === 'object' ? address.port : port}\nServing ${root}\nPress Ctrl+C to stop.`); });
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => server.close());

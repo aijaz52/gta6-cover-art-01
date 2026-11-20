@@ -1,133 +1,87 @@
-/* Optional development verification. Uses an already installed Playwright only. */
+/** Optional real-browser verification. Uses an existing Playwright installation. */
 import assert from 'node:assert/strict';
-import { once } from 'node:events';
-import { writeFile, stat } from 'node:fs/promises';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { readFile, writeFile } from 'node:fs/promises';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { createStudioServer } from '../serve.ts';
+import { RasterCanvas } from './authored-raster.mjs';
 
-const root = fileURLToPath(new URL('../', import.meta.url));
-const server = createStudioServer();
-server.listen(0, '127.0.0.1');
-await once(server, 'listening');
-const origin = `http://127.0.0.1:${server.address().port}`;
+const root = dirname(dirname(fileURLToPath(import.meta.url)));
+const temp = process.env.STUDIO_SHOTS || '/tmp/opencode';
+const server = spawn(process.execPath, ['serve.ts'], { cwd: root, env: { ...process.env, PORT: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
 let browser;
-const issues = [];
-const external = [];
-
-function monitor(page) {
-  page.on('pageerror', error => issues.push(error.message));
-  page.on('request', request => {
-    if (!request.url().startsWith(origin) && !/^(file|data|blob):/.test(request.url())) external.push(request.url());
-  });
-}
-async function settle(page) { await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))); }
-async function screenshot(page, name) {
-  let data;
-  for (const quality of [78, 65, 50, 35]) {
-    data = await page.screenshot({ type: 'jpeg', quality, fullPage: true, animations: 'disabled' });
-    if (data.length <= 256 * 1024) break;
-  }
-  assert.ok(data.length <= 256 * 1024, `${name} exceeds screenshot budget`);
-  await writeFile(path.join(root, 'screenshots', name), data);
-  console.log(`Screenshot: ${name} (${data.length} bytes)`);
-}
-async function downloadPng(page, expectedName) {
-  const pending = page.waitForEvent('download');
-  await page.locator('#export').click();
-  const download = await pending;
-  assert.equal(download.suggestedFilename(), expectedName);
-  const stream = await download.createReadStream();
-  const chunks = [];
-  for await (const chunk of stream) chunks.push(chunk);
-  const bytes = Buffer.concat(chunks);
-  assert.deepEqual([...bytes.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
-  assert.equal(bytes.readUInt32BE(16), 1200);
-  assert.equal(bytes.readUInt32BE(20), 1500);
-  assert.ok(bytes.length > 10000);
-  return bytes;
-}
-
 try {
-  browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1100 }, acceptDownloads: true });
-  const page = await context.newPage();
-  monitor(page);
-  await page.goto(origin, { waitUntil: 'networkidle' });
-  await page.waitForFunction(() => document.querySelector('#status').textContent.includes('Your cover is ready'));
-  await settle(page);
-  const first = await page.locator('#cover').evaluate(canvas => canvas.toDataURL());
-  const photoPixels = await page.locator('#cover').evaluate(canvas => {
-    const data = canvas.getContext('2d').getImageData(200, 200, 1, 1).data;
-    return [...data];
+  const address = await new Promise((resolveAddress, reject) => {
+    let text = '';
+    const timer = setTimeout(() => reject(new Error('Local server did not start')), 10000);
+    server.once('error', reject);
+    server.stdout.on('data', data => { text += data; const match = text.match(/http:\/\/127\.0\.0\.1:\d+/); if (match) { clearTimeout(timer); resolveAddress(match[0]); } });
+    server.once('exit', code => { if (!text.includes('http:')) { clearTimeout(timer); reject(new Error(`Server exited ${code}`)); } });
   });
-  assert.equal(photoPixels[3], 255);
-  await screenshot(page, '1-cover.jpg');
-  const initialPng = await downloadPng(page, 'vice-cover-vice-after-dark.png');
-
-  await page.locator('[data-layout="diagonal"]').click();
-  await page.locator('[data-palette="neon"]').click();
-  await page.locator('#caption').fill('MIDNIGHT RUN');
-  await page.locator('#zoom').fill('145');
-  await page.locator('#focus-x').fill('70');
-  await page.locator('#intensity').fill('85');
-  await settle(page);
-  assert.notEqual(await page.locator('#cover').evaluate(canvas => canvas.toDataURL()), first);
-  assert.equal(await page.locator('[data-layout="diagonal"]').getAttribute('aria-pressed'), 'true');
-  await screenshot(page, '2-editor.jpg');
-  const secondPng = await downloadPng(page, 'vice-cover-midnight-run.png');
-  assert.notDeepEqual(initialPng, secondPng);
-
-  await page.locator('#photo').setInputFiles(path.join(root, 'app/samples/pier.jpg'));
-  await page.waitForFunction(() => document.querySelector('#status').textContent.startsWith('Photo loaded'));
-  await page.locator('[data-layout="grid"]').click();
-  await page.locator('[data-palette="gold"]').click();
-  await page.locator('#caption').fill('GOLDEN STATE');
-  await page.locator('#tagline').fill('EVERY SUNSET HAS A STORY.');
-  await settle(page);
-  await screenshot(page, '3-cover.jpg');
-  await downloadPng(page, 'vice-cover-golden-state.png');
-
-  // Existing state must still edit and download when the browser is offline.
-  await context.setOffline(true);
-  await page.locator('#caption').fill('OFF THE GRID');
-  await settle(page);
-  await downloadPng(page, 'vice-cover-off-the-grid.png');
-  await context.setOffline(false);
-
-  // Incorrect file types must leave the previous image intact and show an error.
-  await page.locator('#photo').setInputFiles({ name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('not a photo') });
-  await page.waitForFunction(() => document.querySelector('#status').classList.contains('error'));
-  assert.match(await page.locator('#status').textContent(), /raster photo/);
-  await page.locator('#caption').fill('W'.repeat(48));
-  await page.locator('#tagline').fill('');
-  await settle(page);
-  await downloadPng(page, `vice-cover-${'w'.repeat(48)}.png`);
-
+  browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1080 }, deviceScaleFactor: 1 });
+  const page = await context.newPage();
+  const errors = [], remote = [];
+  page.on('pageerror', error => errors.push(error.message));
+  page.on('request', request => { if (/^https?:/.test(request.url()) && !request.url().startsWith(address)) remote.push(request.url()); });
+  await page.goto(address, { waitUntil: 'networkidle' });
+  await page.evaluate(() => document.fonts.ready);
+  await page.screenshot({ path: resolve(temp, 'vice-studio-desktop.png'), fullPage: true });
+  const initial = await page.locator('#cover').evaluate(c => c.toDataURL());
+  await page.locator('#caption').fill('MIDNIGHT IN PARADISE');
+  await page.waitForFunction(previous => document.getElementById('cover').toDataURL() !== previous, initial);
+  const captionFrame = await page.locator('#cover').evaluate(c => c.toDataURL());
+  await page.locator('input[name="layout"][value="split"]').check();
+  await page.waitForFunction(previous => document.getElementById('cover').toDataURL() !== previous, captionFrame);
+  await page.screenshot({ path: resolve(temp, 'vice-studio-split.png'), fullPage: true });
+  await page.locator('input[name="palette"][value="neon"]').check();
+  await page.locator('#grain').uncheck();
+  const fixture = new RasterCanvas(320, 240);
+  const ctx = fixture.getContext('2d');
+  ctx.fillStyle = '#e8a69e'; ctx.fillRect(0, 0, 160, 240); ctx.fillStyle = '#4a8ba2'; ctx.fillRect(160, 0, 160, 240);
+  await page.locator('#photo-input').setInputFiles({ name: 'test-photo.png', mimeType: 'image/png', buffer: fixture.toPNG() });
+  await page.locator('#photo-controls').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#upload-title').textContent(), 'test-photo.png');
+  const photoFrame = await page.locator('#cover').evaluate(c => c.toDataURL());
+  await page.locator('#zoom').fill('1.5');
+  await page.locator('#pan-x').fill('0.5');
+  await page.waitForFunction(previous => document.getElementById('cover').toDataURL() !== previous, photoFrame);
+  await page.locator('#resolution').selectOption('2400');
+  const downloadPromise = page.waitForEvent('download');
+  await page.locator('#export-button').click();
+  const download = await downloadPromise;
+  assert.equal(download.suggestedFilename(), 'midnight-in-paradise-cover.png');
+  const png = await readFile(await download.path());
+  assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+  assert.equal(png.readUInt32BE(16), 2400); assert.equal(png.readUInt32BE(20), 3000);
+  await writeFile(resolve(temp, 'vice-studio-browser-export.png'), png);
+  await page.locator('#photo-input').setInputFiles({ name: 'bad.png', mimeType: 'image/png', buffer: Buffer.from('invalid image') });
+  await page.waitForFunction(() => document.getElementById('status').classList.contains('error'));
+  assert.equal(await page.locator('#upload-title').textContent(), 'test-photo.png');
+  await page.locator('#demo-button').click();
+  await page.locator('#photo-controls').waitFor({ state: 'hidden' });
+  assert.equal(await page.locator('#caption').inputValue(), 'MIDNIGHT IN PARADISE');
+  await page.locator('#help-button').click();
+  assert.equal(await page.locator('#help-dialog').evaluate(d => d.open), true);
+  await page.keyboard.press('Escape');
+  await page.locator('#reset-button').click();
+  assert.equal(await page.locator('#caption').inputValue(), 'VICE AFTER HOURS');
+  assert.equal(await page.locator('#resolution').inputValue(), '1200');
   await page.setViewportSize({ width: 390, height: 844 });
-  await settle(page);
-  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Mobile layout must not overflow horizontally');
-  const previewBox = await page.locator('.preview-section').boundingBox();
-  const editorBox = await page.locator('.editor').boundingBox();
-  assert.ok(previewBox.y < editorBox.y, 'Mobile preview should precede controls visually');
-
-  const local = await context.newPage();
-  monitor(local);
+  await page.screenshot({ path: resolve(temp, 'vice-studio-mobile.png'), fullPage: true });
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Mobile layout must not scroll sideways');
+  await page.evaluate(() => navigator.serviceWorker.ready);
+  await page.waitForFunction(() => Boolean(navigator.serviceWorker.controller));
   await context.setOffline(true);
-  await local.goto(pathToFileURL(path.join(root, 'app/index.html')).href, { waitUntil: 'load' });
-  await local.waitForFunction(() => !document.querySelector('#status').textContent.startsWith('Opening'));
-  await settle(local);
-  await downloadPng(local, 'vice-cover-vice-after-dark.png');
-  await local.locator('#photo').setInputFiles(path.join(root, 'app/samples/boulevard.jpg'));
-  await local.waitForFunction(() => document.querySelector('#status').textContent.startsWith('Photo loaded'));
-  await downloadPng(local, 'vice-cover-vice-after-dark.png');
-
-  assert.deepEqual(issues, [], 'No uncaught browser exceptions');
-  assert.deepEqual(external, [], 'No external network requests');
-  for (const name of ['1-cover.jpg', '2-editor.jpg', '3-cover.jpg']) assert.ok((await stat(path.join(root, 'screenshots', name))).size < 262145);
-  console.log('Browser checks passed: real photo upload, 3 layouts, 3 palettes, PNG signature/dimensions, offline editing, direct-file export, long titles, mobile fit, and zero external requests.');
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.locator('#cover').waitFor();
+  await page.locator('#caption').fill('OFFLINE AND ICONIC');
+  await page.waitForFunction(() => document.getElementById('cover').getAttribute('aria-label').startsWith('OFFLINE AND ICONIC'));
+  assert.deepEqual(errors, []); assert.deepEqual(remote, []);
+  console.log('Browser checks passed: live caption, both layouts, palette, texture, photo upload/crop, high-resolution PNG, corrupt image recovery, demo/reset, help dialog, mobile fit, offline reload, zero remote requests.');
+  console.log(`Screenshots and browser PNG: ${temp}`);
 } finally {
   if (browser) await browser.close();
-  await new Promise(resolve => server.close(resolve));
+  server.kill('SIGTERM');
 }

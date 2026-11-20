@@ -1,58 +1,66 @@
 # Vice Cover Studio
 
-An offline photo-to-cover editor inspired by the bold panels, pastel sunsets, and ink borders of crime-game cover art. Load a photo, add a title, compose your poster, and download a clean **1200 × 1500 PNG**. No accounts, API keys, dependencies, uploads, or remote fonts.
+A self-contained photo-to-cover studio inspired by the sun-soaked, ink-bordered, multi-panel aesthetic of crime-game box art. Add a photo and a caption, choose an arrangement and a color story, and download an opaque PNG. Includes an original illustration of a coastal city, a character, a speedboat and a pink sports car. No branded game assets, external images, fonts, packages or remote services are needed.
 
-## Run the studio
+## Run locally
 
-Use Node **22.18 or newer** (native TypeScript support):
+Requires Node 22.18 or later. No installation step.
 
 ```sh
 node serve.ts
 ```
 
-Open **http://127.0.0.1:8080**. Choose another port with `node serve.ts --port 8090` or `PORT=8090 node serve.ts`.
+Open **http://127.0.0.1:4173**. Use `PORT=8080 node serve.ts` to change the port. The server binds to your own computer's loopback interface. Serve over HTTP rather than opening `index.html` with a `file:` URL because the app uses ES modules.
 
-You can also open `app/index.html` directly in a current desktop browser, including while disconnected. The app uses classic scripts so no module server, service worker installation, or internet connection is required. In direct-file mode, start with the procedural illustration or upload your own photo; bundled sample buttons are disabled because browsers restrict reading neighboring image files into an exportable canvas. Run the local server to use the included samples. The served page blocks network connections through its content security policy.
+1. Drop a JPG, PNG or WebP onto the photo area, or click to browse. Images up to 20 MB and 64 megapixels are accepted. The demo works immediately without an upload.
+2. Write a caption of up to 56 Unicode characters. The canvas uppercases and fits it into up to three lines. A blank caption is supported.
+3. Choose **The original** or **Split decision**, one of three palettes, and optional print texture. Uploaded photos are repeated in different crops across all four panels with contrast and color treatment. Zoom and horizontal/vertical controls adjust the crop.
+4. Choose 1200 × 1500 or 2400 × 3000 and click **Export cover**. Ctrl/⌘ + Enter also exports. PNGs are rendered at the selected dimensions independently of the screen preview, without the editor, frame or UI watermark.
 
-## Make a cover
+**Use demo** removes the photo while keeping the caption and styling. **Start fresh** restores the complete initial state. Photos remain in browser memory, are never sent anywhere, and are discarded on reload. Export a cover before closing the tab. Settings are not persisted.
 
-1. Select a photo or drop it on the upload area. JPG, PNG, WEBP, and other browser-decodable raster formats work. The limit is 25 MB and 65 megapixels; SVG is intentionally excluded. Two sample photos from the starter kit are included.
-2. Type a title of up to 48 characters. The title automatically fits onto one or two lines. An optional 60-character tagline appears along the bottom.
-3. Choose **The classic** (7 panels), **Split second** (5 angled panels), or **Six stories** (6 panels). Choose Vice sunset, Neon nights, or Golden hour.
-4. Adjust the photo zoom and horizontal/vertical focus, color intensity, and deterministic film grain. Each panel uses a different crop of the same photo. Reset all restores the initial settings and Boulevard sample.
-5. Press **Export cover**. Your browser downloads `vice-cover-your-title.png`. Export redraws the artwork on its own full-resolution canvas, with no editor frame, watermark, or screenshot artifacts.
+## Offline behavior
 
-The preview updates locally. Image files become temporary object URLs that are released after decoding; photos and captions are never transmitted or saved to browser storage. Reloading starts fresh. Images are resized to a maximum 2200-pixel edge for processing, then posterized with original contour-ink processing before panel composition. This is a deterministic canvas treatment, not a generative AI service. If a sample cannot be opened, an original procedural skyline and palm illustration keeps the editor usable.
+The source server and exported app require no internet connection. All code and demo artwork are local. A small service worker caches the app shell after the first visit on localhost (or HTTPS); allow installation to finish before expecting a server-free offline reload. Browser cache eviction or clearing site data removes this cache. User photos are never cached. If service workers are unavailable, the editor still works with the local server running. No analytics, remote fonts, AI endpoint, account or external API is used.
 
-## Build the bounty entry
+The effect is a deterministic collage, crop and color treatment; it does not use generative AI or turn a photograph into a hand-drawn illustration. The built-in demo artwork is drawn from original vector primitives.
+
+## Build and sample PNG export
 
 ```sh
 mkdir -p /tmp/gcout
 MAKEFUN_OUTPUT_DIR=/tmp/gcout node main.ts
 ```
 
-Without `MAKEFUN_OUTPUT_DIR`, the destination is `/output`. The driver validates required app files, rejects symlink inputs, packages the app and screenshots, and writes a deterministic SHA-256 `build-manifest.json`, this README, and the canonical `dossier.json` using the starter's existing make.fun packaging library. It prints the destination and bundle size and exits zero on success. No browser, package manager, or network is needed to build. The destination must be separate from the source app and cannot be the project root or an ancestor of it.
+With no environment variable the build goes to `dist/`. The build driver exits after producing a complete static app, a SHA-256 asset manifest, a 1000 × 1250 `sample-cover.png`, and a copy of the local server. It has no network or package dependency. The sample uses a small original software rasterizer and bitmap letterforms; browser exports use native canvas text and anti-aliasing.
 
-Open the exported `app/index.html` to use the packaged version. Screenshot evidence lives in `screenshots/`; those files are not used by the editor.
+To serve the built folder:
 
-## Tests
+```sh
+node /tmp/gcout/serve.ts
+```
+
+Alternatively use `STUDIO_ROOT=/tmp/gcout node serve.ts`. You can deploy the exported folder to any static host, including at a subdirectory. The service worker uses relative asset URLs.
+
+## Verify
 
 ```sh
 node --test app/tests/studio.test.mjs
 ```
 
-The dependency-free Node tests check crop geometry, zoom and focus bounds, full panel coverage, text fitting, safe filenames, immutable defaults, all nine layout/color combinations, the no-photo fallback, balanced canvas state, local-only script references, and the real HTTP server's assets, HEAD responses, and path handling.
+Tests cover Unicode captions, option validation, exact panel area, crop coverage and aspect ratio, safe export filenames, line wrapping, all six layout/palette combinations, deterministic rendering, PNG encoding, blank/long captions, accessible controls and local assets. The suite uses only Node's standard library and executes real renders. A browser smoke check should additionally exercise upload, crop, layout changes, PNG download, mobile layout and an offline reload.
 
-`tools/browser-check.mjs` provides an additional development smoke test when Playwright and its Chromium browser are already installed. It exercises the real canvas, upload, layouts, PNG encoding, direct-file operation, and mobile layout, and regenerates three screenshots. It is not required to run or build the app and never downloads dependencies.
+An optional automated browser check is available with `node tools/browser-check.mjs` when Playwright and its Chromium browser are already installed. It verifies the real editor, a 2400 × 3000 downloaded PNG, invalid image recovery, mobile fit, service-worker offline reload and the absence of remote requests. Screenshots go to `/tmp/opencode` by default; use `STUDIO_SHOTS` to select an existing output directory. This verification tool is not part of the shipped app or its runtime requirements.
 
 ## Source map
 
-- `main.ts` — Node 22 build and export driver.
-- `serve.ts` — loopback static server, with `createStudioServer()` exported for tests.
-- `app/index.html`, `app/style.css` — accessible responsive editor.
-- `app/src/cover.js` — self-contained original canvas compositor and pure geometry/text helpers.
-- `app/src/main.js` — local image handling, controls, preview scheduling, and PNG download.
-- `app/tests/studio.test.mjs` — built-in Node test suite.
-- `vendor/makefun-app.ts` — pre-existing starter packaging library; not part of the browser app.
+- `main.ts` — portable build and sample PNG driver.
+- `serve.ts` — loopback static server for source and exported apps.
+- `app/index.html`, `app/style.css` — responsive, accessible editor shell.
+- `app/src/main.js` — browser state, uploads, controls and PNG downloads.
+- `app/src/cover.js` — pure layout/caption/crop utilities and shared canvas renderer.
+- `app/sw.js` — local app-shell cache.
+- `tools/authored-raster.mjs` — original Node software canvas and PNG encoder.
+- `app/tests/studio.test.mjs` — dependency-free Node tests.
 
-All application implementation and tests were authored for this entry. The original starter sample photographs and packaging library are retained. Independent fan-made tool; no affiliation with Rockstar Games or Grand Theft Auto. Use photos you have permission to edit and share.
+Designed for current Chrome, Edge, Firefox and Safari with canvas, ES modules, `HTMLImageElement.decode`, `dialog` and CSS `:has()` support. Font selection varies by platform because all typography uses installed system fonts. The Node sample intentionally uses its own bitmap font for portability. This is an independent fan-made aesthetic study, unaffiliated with Rockstar Games or Grand Theft Auto.

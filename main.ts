@@ -1,67 +1,40 @@
-/* Vice Cover Studio build/export driver. Node 22; no install or network needed. */
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
+/** Node 22 build/export driver. No install, browser, or network required. */
+import { mkdir, copyFile, writeFile } from 'node:fs/promises';
+import { resolve, dirname, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { buildDossier as describeEntry } from './vendor/makefun-app.ts';
+import { readFile } from 'node:fs/promises';
+import { renderCover, DEFAULTS } from './app/src/cover.js';
+import { RasterCanvas } from './tools/authored-raster.mjs';
 
-const project = import.meta.dirname;
-const destination = path.resolve(process.env.MAKEFUN_OUTPUT_DIR || '/output');
-const sourceApp = path.join(project, 'app');
-
-async function inventory(directory, prefix = '') {
-  const result = [];
-  const entries = await fs.readdir(directory, { withFileTypes: true });
-  entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
-  for (const entry of entries) {
-    const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
-    const absolute = path.join(directory, entry.name);
-    if (entry.isSymbolicLink()) throw new Error(`Build inputs cannot contain links: ${relative}`);
-    if (entry.isDirectory()) result.push(...await inventory(absolute, relative));
-    else if (entry.isFile()) {
-      const data = await fs.readFile(absolute);
-      result.push({ path: relative, bytes: data.length, sha256: createHash('sha256').update(data).digest('hex') });
-    } else throw new Error(`Unsupported build input: ${relative}`);
-  }
-  return result;
-}
+const root = dirname(fileURLToPath(import.meta.url));
+const output = resolve(process.env.MAKEFUN_OUTPUT_DIR || resolve(root, 'dist'));
+const assets = ['index.html', 'style.css', 'icon.svg', 'sw.js', 'src/main.js', 'src/cover.js'];
 
 async function build() {
-  if (destination === project || project.startsWith(destination + path.sep) || destination === sourceApp || destination.startsWith(sourceApp + path.sep)) {
-    throw new Error('Choose an output directory separate from the project root and app sources.');
+  // Fail before overwriting source if an output directory is misconfigured.
+  const fromApp = relative(resolve(root, 'app'), output);
+  if (output === root || !(fromApp === '..' || fromApp.startsWith(`..${sep}`))) {
+    throw new Error('Choose an output directory outside the app source directory and repository root.');
   }
-  const files = await inventory(sourceApp);
-  for (const required of ['index.html', 'style.css', 'src/cover.js', 'src/main.js']) {
-    if (!files.some(file => file.path === required)) throw new Error(`Missing app file: ${required}`);
+  await mkdir(output, { recursive: true });
+  const manifest = [];
+  for (const asset of assets) {
+    const destination = resolve(output, asset);
+    await mkdir(dirname(destination), { recursive: true });
+    await copyFile(resolve(root, 'app', asset), destination);
+    const bytes = await readFile(destination);
+    manifest.push({ file: asset, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') });
   }
-  await fs.mkdir(destination, { recursive: true });
-  await fs.cp(sourceApp, path.join(destination, 'app'), { recursive: true });
-  await fs.cp(path.join(project, 'screenshots'), path.join(destination, 'screenshots'), { recursive: true });
-  await fs.copyFile(path.join(project, 'README.md'), path.join(destination, 'README.md'));
-  const manifest = {
-    name: 'Vice Cover Studio',
-    version: '1.0.0',
-    entry: 'app/index.html',
-    offline: true,
-    export: { type: 'image/png', width: 1200, height: 1500 },
-    layouts: ['classic', 'diagonal', 'grid'],
-    files
-  };
-  await fs.writeFile(path.join(destination, 'build-manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
-  const limits = {
-    text_max_bytes: 160 * 1024,
-    app_max_files: 993,
-    app_max_bytes: 48 * 1024 * 1024,
-    app_path_max_bytes: 1000,
-    screenshots: { max: 4, max_bytes: 256 * 1024 }
-  };
-  const dossier = describeEntry(destination, limits);
-  await fs.writeFile(path.join(destination, 'dossier.json'), dossier);
-  console.log(`Vice Cover Studio built successfully → ${destination}`);
-  console.log(`${files.length} app files · ${files.reduce((sum, file) => sum + file.bytes, 0).toLocaleString('en-US')} bytes · 3 layouts · offline PNG export`);
-  console.log('Open app/index.html in a browser, or run node serve.ts from the project.');
+  const preview = new RasterCanvas(1000, 1250);
+  renderCover(preview, DEFAULTS);
+  const png = preview.toPNG();
+  await writeFile(resolve(output, 'sample-cover.png'), png);
+  await writeFile(resolve(output, 'build-manifest.json'), JSON.stringify({ name: 'Vice Cover Studio', offline: true, entry: 'index.html', sample: 'sample-cover.png', assets: manifest }, null, 2) + '\n');
+  await copyFile(resolve(root, 'serve.ts'), resolve(output, 'serve.ts'));
+  await writeFile(resolve(output, 'package.json'), JSON.stringify({ private: true, type: 'module' }, null, 2) + '\n');
+  await writeFile(resolve(output, 'START-HERE.txt'), 'VICE COVER STUDIO\n\nRun: node serve.ts\nOpen: http://127.0.0.1:4173\n\nThis folder is a complete, dependency-free offline web app.\nUse a local HTTP server for ES modules and offline caching.\nThe sample-cover.png was rendered by the Node build driver.\nBrowser exports use full native canvas typography.\n');
+  console.log(`Vice Cover Studio built successfully.\nOutput: ${output}\nWeb app: ${resolve(output, 'index.html')}\nSample PNG: ${resolve(output, 'sample-cover.png')} (${png.length.toLocaleString('en-US')} bytes)\nServe: node ${resolve(output, 'serve.ts')}\nNo packages or network access required.`);
 }
 
-await build().catch(error => {
-  console.error(`Vice Cover Studio build failed: ${error.message}`);
-  process.exitCode = 1;
-});
+build().catch(error => { console.error(`Build failed: ${error.message}`); process.exitCode = 1; });
