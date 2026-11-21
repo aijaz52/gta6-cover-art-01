@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT -->
 # Vice Cover Studio
 
 Turn a photo and caption into a five-panel cover inspired by the sunset palettes, heavy outlines, and angled frames of GTA VI-style box art. The editor starts with an original, locally drawn coastal scene so you can try every control before adding a photo.
